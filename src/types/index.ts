@@ -1,48 +1,33 @@
-export interface Question {
-  id: number;
-  title: string;
-  body?: string;
-  author: string;
-  createdAt: Date;
-  votes: number;
-  answers: number;
-  views: number;
-  tags: string[];
-  answersList?: Answer[];
+export type Role = 'user' | 'assistant';
+
+export interface ToolInvocation {
+  id: string;
+  toolId: string;
+  label: string;
+  detail: string;
+  output: string;
+  ok: boolean;
 }
 
-export interface Answer {
-  id: number;
-  questionId: number;
-  body: string;
-  author: string;
-  authorId: number;
-  createdAt: Date;
-  votes: number;
-  accepted: boolean;
+export interface ChatMessage {
+  id: string;
+  role: Role;
+  content: string;
+  createdAt: number;
+  streaming?: boolean;
+  toolInvocation?: ToolInvocation;
 }
 
-export interface User {
-  id: number;
-  name: string;
-  email: string;
-  reputation: number;
-  joinedAt: Date;
-  location?: string;
-  bio?: string;
-  website?: string;
-  questionsAsked?: number;
-  answersGiven?: number;
-  badges?: number;
-  topTags?: string[];
+export interface ProviderSettings {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 }
 
-export interface Tag {
-  id: number;
-  name: string;
-  description: string;
-  count: number;
-  todayCount: number;
-  createdAt: Date;
-  trending?: boolean;
-}
+export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
+  enabled: false,
+  baseUrl: 'https://api.openai.com/v1',
+  apiKey: '',
+  model: 'gpt-4o-mini',
+};

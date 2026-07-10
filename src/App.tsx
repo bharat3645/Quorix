@@ -1,258 +1,126 @@
-import React, { useState, useEffect } from 'react';
-import { Header } from './components/Header';
-import { Sidebar } from './components/Sidebar';
-import { QuestionsList } from './components/QuestionsList';
-import { QuestionDetail } from './components/QuestionDetail';
-import { AskQuestion } from './components/AskQuestion';
-import { TagsPage } from './components/TagsPage';
-import { UsersPage } from './components/UsersPage';
-import { UserProfile } from './components/UserProfile';
-import { JobsPage } from './components/JobsPage';
-import { CompaniesPage } from './components/CompaniesPage';
-import { CollectivesPage } from './components/CollectivesPage';
-import { TeamsPage } from './components/TeamsPage';
-import { LoginModal } from './components/LoginModal';
-import { questionsData } from './data/questionsData';
-import { usersData } from './data/usersData';
-import { tagsData } from './data/tagsData';
-import { Question, User, Tag, Answer } from './types';
+import { useEffect, useRef, useState } from 'react';
+import { Moon, Sun, Settings as SettingsIcon, ExternalLink } from 'lucide-react';
+import type { ChatMessage, ProviderSettings } from './types';
+import { DEFAULT_PROVIDER_SETTINGS } from './types';
+import { planLocalTurn, simulateStream, streamFromProvider } from './lib/agent';
+import { useLocalStorage } from './hooks/useLocalStorage';
+import { ChatWindow } from './components/ChatWindow';
+import { Composer } from './components/Composer';
+import { SettingsPanel } from './components/SettingsPanel';
 
-type ViewType = 'home' | 'question' | 'ask' | 'tags' | 'users' | 'profile' | 'jobs' | 'companies' | 'teams' | 'collectives';
+function newId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
-function App() {
-  const [currentView, setCurrentView] = useState<ViewType>('home');
-  const [selectedQuestion, setSelectedQuestion] = useState<Question | null>(null);
-  const [selectedUser, setSelectedUser] = useState<User | null>(null);
-  const [questions, setQuestions] = useState<Question[]>(questionsData);
-  const [users, setUsers] = useState<User[]>(usersData);
-  const [tags] = useState<Tag[]>(tagsData);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [showLoginModal, setShowLoginModal] = useState(false);
-  const [sortBy, setSortBy] = useState<'newest' | 'active' | 'unanswered' | 'votes'>('newest');
+export default function App() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useLocalStorage<ProviderSettings>('quorix:provider-settings', DEFAULT_PROVIDER_SETTINGS);
+  const [darkMode, setDarkMode] = useLocalStorage<boolean>('quorix:dark-mode', true);
+
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    // Auto-login for demo purposes
-    setCurrentUser(users[0]);
-  }, [users]);
+    document.documentElement.classList.toggle('dark', darkMode);
+  }, [darkMode]);
 
-  const handleQuestionClick = (question: Question) => {
-    // Increment view count
-    setQuestions(prev => prev.map(q => 
-      q.id === question.id ? { ...q, views: q.views + 1 } : q
-    ));
-    setSelectedQuestion(question);
-    setCurrentView('question');
-  };
+  async function send(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed || isStreaming) return;
 
-  const handleUserClick = (user: User) => {
-    setSelectedUser(user);
-    setCurrentView('profile');
-  };
-
-  const handleAskQuestion = (newQuestion: Omit<Question, 'id' | 'createdAt' | 'votes' | 'answers' | 'views'>) => {
-    const question: Question = {
-      ...newQuestion,
-      id: questions.length + 1,
-      createdAt: new Date(),
-      votes: 0,
-      answers: 0,
-      views: 0
+    const userMessage: ChatMessage = { id: newId('user'), role: 'user', content: trimmed, createdAt: Date.now() };
+    const assistantId = newId('assistant');
+    const assistantMessage: ChatMessage = {
+      id: assistantId, role: 'assistant', content: '', createdAt: Date.now(), streaming: true,
     };
-    setQuestions([question, ...questions]);
-    setCurrentView('home');
-  };
 
-  const handleVoteQuestion = (questionId: number, voteType: 'up' | 'down') => {
-    if (!currentUser) {
-      setShowLoginModal(true);
-      return;
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setInput('');
+    setIsStreaming(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    function updateAssistant(patch: Partial<ChatMessage>) {
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)));
     }
 
-    setQuestions(prev => prev.map(q => {
-      if (q.id === questionId) {
-        const newVotes = voteType === 'up' ? q.votes + 1 : q.votes - 1;
-        return { ...q, votes: newVotes };
+    try {
+      if (settings.enabled && settings.apiKey) {
+        const history = [...messages, userMessage]
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role, content: m.content }));
+
+        await streamFromProvider(settings, history, (partial) => updateAssistant({ content: partial }), controller.signal);
+      } else {
+        const { toolInvocation, replyText } = planLocalTurn(trimmed);
+        if (toolInvocation) updateAssistant({ toolInvocation });
+        await simulateStream(replyText, (partial) => updateAssistant({ content: partial }), { signal: controller.signal });
       }
-      return q;
-    }));
-
-    if (selectedQuestion?.id === questionId) {
-      setSelectedQuestion(prev => prev ? {
-        ...prev,
-        votes: voteType === 'up' ? prev.votes + 1 : prev.votes - 1
-      } : null);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      updateAssistant({ content: `Something went wrong: ${message}` });
+    } finally {
+      updateAssistant({ streaming: false });
+      setIsStreaming(false);
+      abortRef.current = null;
     }
-  };
+  }
 
-  const handleAddAnswer = (questionId: number, answerText: string) => {
-    if (!currentUser) {
-      setShowLoginModal(true);
-      return;
-    }
-
-    const newAnswer: Answer = {
-      id: Date.now(),
-      questionId,
-      body: answerText,
-      author: currentUser.name,
-      authorId: currentUser.id,
-      createdAt: new Date(),
-      votes: 0,
-      accepted: false
-    };
-
-    // Update questions with new answer count
-    setQuestions(prev => prev.map(q => 
-      q.id === questionId ? { ...q, answers: q.answers + 1 } : q
-    ));
-
-    // Update selected question if it's the current one
-    if (selectedQuestion?.id === questionId) {
-      setSelectedQuestion(prev => prev ? {
-        ...prev,
-        answers: prev.answers + 1,
-        answersList: [...(prev.answersList || []), newAnswer]
-      } : null);
-    }
-  };
-
-  const filteredQuestions = questions.filter(question => {
-    const matchesSearch = question.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         question.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase())) ||
-                         (question.body && question.body.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    if (sortBy === 'unanswered') {
-      return matchesSearch && question.answers === 0;
-    }
-    
-    return matchesSearch;
-  }).sort((a, b) => {
-    switch (sortBy) {
-      case 'newest':
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      case 'votes':
-        return b.votes - a.votes;
-      case 'active':
-        return b.views - a.views;
-      default:
-        return 0;
-    }
-  });
-
-  const handleLogin = (email: string, password: string) => {
-    // Simple demo login - find user by email
-    const user = users.find(u => u.email === email);
-    if (user) {
-      setCurrentUser(user);
-      setShowLoginModal(false);
-    }
-  };
-
-  const handleLogout = () => {
-    setCurrentUser(null);
-  };
+  function stop() {
+    abortRef.current?.abort();
+  }
 
   return (
-    <div className="min-h-screen bg-white">
-      <Header 
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        onNavigate={setCurrentView}
-        currentUser={currentUser}
-        onLogin={() => setShowLoginModal(true)}
-        onLogout={handleLogout}
-      />
-      
-      <div className="max-w-7xl mx-auto flex">
-        <Sidebar currentView={currentView} onNavigate={setCurrentView} />
-        
-        <main className="flex-1 p-6">
-          {currentView === 'home' && (
-            <QuestionsList 
-              questions={filteredQuestions}
-              onQuestionClick={handleQuestionClick}
-              onAskQuestion={() => setCurrentView('ask')}
-              onVote={handleVoteQuestion}
-              currentUser={currentUser}
-              sortBy={sortBy}
-              onSortChange={setSortBy}
-            />
-          )}
-          
-          {currentView === 'question' && selectedQuestion && (
-            <QuestionDetail 
-              question={selectedQuestion}
-              onBack={() => setCurrentView('home')}
-              onVote={handleVoteQuestion}
-              onAddAnswer={handleAddAnswer}
-              currentUser={currentUser}
-              onUserClick={handleUserClick}
-            />
-          )}
-          
-          {currentView === 'ask' && (
-            <AskQuestion 
-              onSubmit={handleAskQuestion}
-              onCancel={() => setCurrentView('home')}
-              currentUser={currentUser}
-            />
-          )}
+    <div className="flex h-screen flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3 sm:px-6 dark:border-slate-800">
+        <div className="flex items-center gap-2">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white">
+            Q
+          </div>
+          <div>
+            <h1 className="text-sm font-semibold leading-none text-slate-800 dark:text-slate-100">Quorix</h1>
+            <p className="text-[11px] leading-none text-slate-400 dark:text-slate-500">Agent Console</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <a
+            href="https://github.com/bharat3645/Quorix"
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            aria-label="View source on GitHub"
+          >
+            <ExternalLink size={16} />
+          </a>
+          <button
+            type="button"
+            onClick={() => setDarkMode(!darkMode)}
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            aria-label="Toggle dark mode"
+          >
+            {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            aria-label="Open settings"
+          >
+            <SettingsIcon size={16} />
+          </button>
+        </div>
+      </header>
 
-          {currentView === 'tags' && (
-            <TagsPage 
-              tags={tags}
-              onTagClick={(tag) => {
-                setSearchQuery(tag);
-                setCurrentView('home');
-              }}
-            />
-          )}
+      <main className="flex-1 overflow-y-auto">
+        <ChatWindow messages={messages} onExampleClick={(text) => send(text)} />
+      </main>
 
-          {currentView === 'users' && (
-            <UsersPage 
-              users={users}
-              onUserClick={handleUserClick}
-            />
-          )}
+      <Composer value={input} onChange={setInput} onSend={() => send(input)} onStop={stop} isStreaming={isStreaming} />
 
-          {currentView === 'profile' && selectedUser && (
-            <UserProfile 
-              user={selectedUser}
-              questions={questions.filter(q => q.author === selectedUser.name)}
-              onBack={() => setCurrentView('home')}
-              onQuestionClick={handleQuestionClick}
-              isCurrentUser={currentUser?.id === selectedUser.id}
-            />
-          )}
-
-          {currentView === 'jobs' && (
-            <JobsPage onNavigate={setCurrentView} />
-          )}
-
-          {currentView === 'companies' && (
-            <CompaniesPage onNavigate={setCurrentView} />
-          )}
-
-          {currentView === 'collectives' && (
-            <CollectivesPage onNavigate={setCurrentView} />
-          )}
-
-          {currentView === 'teams' && (
-            <TeamsPage onNavigate={setCurrentView} currentUser={currentUser} />
-          )}
-        </main>
-      </div>
-
-      {showLoginModal && (
-        <LoginModal
-          onClose={() => setShowLoginModal(false)}
-          onLogin={handleLogin}
-          users={users}
-        />
-      )}
+      <SettingsPanel open={settingsOpen} settings={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
-
-export default App;

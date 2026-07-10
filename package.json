@@ -1,7 +1,8 @@
 {
-  "name": "vite-react-typescript-starter",
+  "name": "quorix",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "A small, local-first console for exploring agentic AI UI patterns: streaming responses, inline tool-call visualization, and generative UI — built around a handful of tools that actually run, no backend required.",
   "type": "module",
   "scripts": {
     "dev": "vite",
